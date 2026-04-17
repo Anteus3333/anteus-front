@@ -1,6 +1,6 @@
 'use client'
 
-import { useOptimistic, useRef, useTransition } from 'react'
+import { useOptimistic, useRef, useState, useTransition } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import TodoItem from '@/app/components/TodoItem'
 import { addTodo, deleteTodo, updateTodo } from '@/app/actions/todos'
@@ -24,7 +24,27 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
 
   const formRef = useRef<HTMLFormElement>(null)
   const previousTodosRef = useRef<Todo[]>(initialTodos)
-  const [isPending, startTransition] = useTransition()
+  const [, startTransition] = useTransition()
+
+  // Loading par todo (pas global)
+  const [isAdding, setIsAdding] = useState(false)
+  const [pendingIds, setPendingIds] = useState<Set<string | number>>(new Set())
+
+  const addPending = (id: string | number) => {
+    setPendingIds(prev => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+  }
+
+  const removePending = (id: string | number) => {
+    setPendingIds(prev => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
 
   // Stockage temporaire
   const pendingDeletes = useRef<Map<string | number, Todo>>(new Map())
@@ -77,6 +97,9 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
     const previous = optimisticTodos
     previousTodosRef.current = previous
 
+    setIsAdding(true)
+    addPending(tempId)
+
     startTransition(() => {
       updateOptimistic({ type: 'add', todo: newOptimisticTodo })
     })
@@ -100,70 +123,82 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
           todo: result.todo
         })
       }
+
+      removePending(tempId)
+      setIsAdding(false)
     })
   }
 
   // ➜ DELETE
   const handleDelete = (id: string | number) => {
-  const todoToDelete = optimisticTodos.find(t => t.id === id)
-  if (!todoToDelete) return
+    const todoToDelete = optimisticTodos.find(t => t.id === id)
+    if (!todoToDelete) return
 
-  // stocker pour undo
-  pendingDeletes.current.set(id, todoToDelete)
+    // stocker pour undo
+    pendingDeletes.current.set(id, todoToDelete)
 
-  // suppression optimiste
-  startTransition(() => {
-    updateOptimistic({ type: 'delete', id })
-  })
+    // suppression optimiste
+    startTransition(() => {
+      updateOptimistic({ type: 'delete', id })
+    })
 
-  // timer avant suppression réelle
-  const timeout = setTimeout(async () => {
-    const result = await deleteTodo(id)
+    // timer avant suppression réelle
+    const timeout = setTimeout(async () => {
+      // marque comme en cours de suppression (au cas où on rollback)
+      addPending(id)
 
-    if (result?.error) {
-      toast.error("Erreur suppression")
+      const result = await deleteTodo(id)
 
-      // rollback
-      updateOptimistic({
-        type: 'add',
-        todo: todoToDelete
-      })
-    } else {
-      pendingDeletes.current.delete(id)
-    }
-  }, 3000) // ⏳ 3 secondes pour undo
+      if (result?.error) {
+        toast.error("Erreur suppression")
 
-  // toast avec bouton Undo
-  toast(
-    (t) => (
-      <div className="flex items-center gap-3">
-        <span>Supprimé</span>
+        // rollback
+        startTransition(() => {
+          updateOptimistic({
+            type: 'add',
+            todo: todoToDelete
+          })
+        })
+      } else {
+        pendingDeletes.current.delete(id)
+      }
 
-        <button
-          onClick={() => {
-            clearTimeout(timeout)
+      removePending(id)
+    }, 3000) // ⏳ 3 secondes pour undo
 
-            const todo = pendingDeletes.current.get(id)
-            if (!todo) return
+    // toast avec bouton Undo
+    toast(
+      (t) => (
+        <div className="flex items-center gap-3">
+          <span>Supprimé</span>
 
-            // restauration
-            updateOptimistic({
-              type: 'add',
-              todo
-            })
+          <button
+            onClick={() => {
+              clearTimeout(timeout)
 
-            pendingDeletes.current.delete(id)
-            toast.dismiss(t.id)
-          }}
-          className="text-blue-500 font-semibold"
-        >
-          Annuler
-        </button>
-      </div>
-    ),
-    { duration: 3000 }
-  )
-}
+              const todo = pendingDeletes.current.get(id)
+              if (!todo) return
+
+              // restauration
+              startTransition(() => {
+                updateOptimistic({
+                  type: 'add',
+                  todo
+                })
+              })
+
+              pendingDeletes.current.delete(id)
+              toast.dismiss(t.id)
+            }}
+            className="text-blue-500 font-semibold"
+          >
+            Annuler
+          </button>
+        </div>
+      ),
+      { duration: 3000 }
+    )
+  }
 
   /*
   const handleDelete = (id: string | number) => {
@@ -193,6 +228,8 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
     const previous = optimisticTodos
     previousTodosRef.current = previous
 
+    addPending(updatedTodo.id)
+
     startTransition(() => {
       updateOptimistic({ type: 'update', todo: updatedTodo })
     })
@@ -218,6 +255,8 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
           todo: result.todo
         })
       }
+
+      removePending(updatedTodo.id)
     })
   }
 
@@ -243,10 +282,10 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
 
         <button 
           type="submit"
-          disabled={isPending}
+          disabled={isAdding}
           className="bg-gray-900 text-white px-4 py-2 rounded-md hover:bg-gray-800 transition disabled:opacity-50"
         >
-          {isPending ? "..." : "Ajouter"}
+          {isAdding ? "..." : "Ajouter"}
         </button>
       </form>
 
@@ -266,6 +305,7 @@ export default function OptimisticTodos({ initialTodos }: { initialTodos: Todo[]
                 todo={todo} 
                 onDelete={handleDelete}
                 onUpdate={handleUpdate}
+                isPending={pendingIds.has(todo.id)}
               />
             </motion.li>
           ))}
